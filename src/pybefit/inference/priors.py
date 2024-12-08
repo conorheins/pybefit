@@ -127,6 +127,69 @@ class NormalGamma(ModelBase):
 
         return z
 
+class DPNormalGamma(ModelBase):
+    """
+    Dirichlet process Normal-Gamma prior over free model parameters
+    """
+    def __init__(self, num_params, num_agents, num_components, hyper_params=None, backend=BACKEND):
+        super().__init__(num_params=num_params, num_agents=num_agents, backend=backend)
+        h_params = {
+            'a': self.tensor.ones(num_params) / 2,
+            'b': self.tensor.ones(num_params),
+            'm': self.tensor.zeros(num_params),
+            's': self.tensor.ones(num_params) / 5,
+        }
+
+        self.hyper_params = h_params if hyper_params is None else h_params | hyper_params
+        self.num_components = num_components
+
+    def __log_stick_breaking(self, z):
+        log_z1m_cumprod = self.tensor.cumsum(self.tensor.log(1 - z), axis=-1)
+        pad_width = [(0, 0)] * x.ndim
+        pad_width[-1] = (0, 1)
+        z_padded = self.tensor.pad(self.tensor.log(z), pad_width)
+        pad_width = [(0, 0)] * x.ndim
+        pad_width[-1] = (1, 0)
+        log_z1m_cumprod_shifted = self.tensor.pad(
+            log_z1m_cumprod, pad_width
+        )
+        return log_z_padded + log_z1m_cumprod_shifted
+
+    def __call__(self, *args, **kwargs):
+        na = self.num_agents
+        np = self.num_params
+        nc = self.num_components
+
+        # make alpha a free parameter
+        alpha = self.param('alpha', jnp.ones(1))
+
+        with self.plate('components', nc - 1):
+            beta = self.sample('beta', dist.Beta(1, alpha))
+            log_probs = self.__log_stick_breaking(beta)
+
+            # define hyper priors over model parameters
+            a = self.hyper_params['a'] # 2 * self.tensor.ones(np)
+            b = self.hyper_params['b'] # 2 * self.tensor.ones(np)
+            tau = self.sample('var_tau', self.dist.Gamma(a, b).to_event(1))
+
+            # prior uncertainty is sampled from inverse gamma distribution for each parameter
+            sigma = self.deterministic('sigma', self.tensor.sqrt(1/tau))
+
+            m = self.hyper_params['m']
+            s = self.hyper_params['s']
+        
+            # each model parameter has a hyperprior defining group level mean for each component
+            with self.func_reparam(config={"mu": self.reparam.LocScaleReparam(0.)}):
+                mu = self.sample('mu', self.dist.Normal(m, s*sigma).to_event(1))
+
+
+        # parameters for individual agents are sampled from the class specific prior
+        with self.plate('agents', na):
+            c = self.sample('c', dist.Categorical(logits=log_probs))
+            with self.func_reparam(config={"z": self.reparam.LocScaleReparam(0.)}):
+                z = self.sample('z', self.dist.Normal(mu[c], sigma[c]).to_event(1))
+
+        return z
 
 class RegularisedHorseshoe(ModelBase):
     """Regularised horseshoe prior over free model parameters. For details see: Piironen, Juho, and Aki Vehtari. "Sparsity information and regularization in the horseshoe and other shrinkage priors." (2017): 5018-5051.

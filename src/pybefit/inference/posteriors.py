@@ -80,12 +80,58 @@ class NormalGammaPosterior(ModelBase):
         scale = self.param('scale.mu', self.init_scale * self.tensor.ones(np), constraint=self.constraints.softplus_positive)
         self.sample('mu_decentered', self.dist.Normal(loc, scale).to_event(1))
 
-        # posterior distirbution over model parametrs for individual subjects
+        # posterior distribution over model parametrs for individual subjects
         with self.plate('agents', na):
             loc = self.param('loc', self.tensor.zeros((na, np))) / sigma
             scale_tril = self.param('scale_tril', self.tensor.broadcast_to(self.init_scale * self.tensor.eye(np), (na, np, np)), constraint=self.constraints.softplus_lower_cholesky)
             self.sample('z_decentered', self.dist.MultivariateNormal(loc, scale_tril=scale_tril))
 
+class DPNormalGammaPosterior(ModelBase):
+    """
+    Dirichlet process Normal-Gamma posterior
+    """
+    def __init__(self, num_params, num_agents, init_scale=.1, backend=BACKEND):
+        super().__init__(num_params=num_params, num_agents=num_agents, backend=backend)
+        self.init_scale = init_scale
+
+    def __call__(self, *args, **kwargs):
+        na = self.num_agents
+        np = self.num_params
+        nc = self.num_components
+
+        a_beta = self.param('a_beta', self.tensor.ones(nc - 1), constraint=self.constraints.softplus_positive)
+        b_beta = self.param('b_beta', self.tensor.ones(nc - 1), constraint=self.constraints.softplus_positive)
+        self.sample('beta', dist.Beta(a_beta, b_beta).to_event(1))
+
+        with self.plate('num_components', nc):
+            # define hyper priors over model parameters
+            a_tau = self.param(
+                'a_tau', 2 * self.tensor.ones((nc, np)), constraint=self.constraints.softplus_positive
+            )
+            b_tau = self.param(
+                'b_beta', 2 * self.tensor.ones((nc, np)), constraint=self.constraints.softplus_positive
+            )
+            tau = self.sample('var_tau', self.dist.Gamma(a, b).to_event(1))
+
+            # prior uncertainty is sampled from inverse gamma distribution for each parameter
+            sigma = self.deterministic('sigma', self.tensor.sqrt(1/tau))
+
+            loc = self.param('loc_mu', self.tensor.zeros((nc, np))) / sigma
+            s = self.param('s_mu', self.tensor.ones((nc, np)), constraint=self.constraints.softplus_positive)
+        
+            self.sample('mu_decentered', self.dist.Normal(loc, s).to_event(1))
+
+
+        # parameters for individual agents are sampled from the class specific prior
+        loc = self.param('loc', self.tensor.zeros((nc, na, np))) / sigma[:, None]
+        scale_tril = self.param(
+            'scale_tril', self.tensor.broadcast_to(self.init_scale * self.tensor.eye(np), (nc, na, np, np)),
+            constraint=self.constraints.softplus_lower_cholesky
+        )
+        
+        with self.plate('agents', na) as idx:
+            c = self.sample('c', dist.Categorical(logits=logits), infer={"enumerate": "parallel"})
+            self.sample('z_decentered', self.dist.MultivariateNormal(loc[c, idx], scale_tril=scale_tril[c, idx]))
 
 class RegularisedHorseshoePosterior(ModelBase):
     """Posterior distribution for the regularised horseshoe prior.
