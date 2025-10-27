@@ -52,12 +52,13 @@ def pymdp_evolve_trials(agent, data, task, num_trials):
             outcome_t, task = task.step(keys, actions=actions_t)
         else:
             actions_t = data['multiactions'][..., t, :]
-            outcome_t = jtu.tree_map(lambda x: x[..., t + 1], data['outcomes'])
+            outcome_t = jtu.tree_map(lambda x: jnp.expand_dims(x[..., t + 1], -1), data['outcomes'])
 
         action_probs_t = agent.multiaction_probabilities(q_pi)
+
         outcomes = jtu.tree_map(
            lambda prev_o, new_o: jnp.concatenate(
-               [prev_o, jnp.expand_dims(new_o, -1)], 
+               [prev_o, new_o], 
                -1), outcomes, outcome_t
           )
 
@@ -82,7 +83,7 @@ def pymdp_evolve_trials(agent, data, task, num_trials):
     if data_absence:
         key = prng_key()
         keys = jr.split(key, agent.batch_size)
-        outcome_0 = jtu.tree_map(lambda x: jnp.expand_dims(x, -1), task.step(keys)[0])
+        outcome_0, _ = task.step(keys)
     else:
         outcome_0 = jtu.tree_map(lambda x: x[..., :1], data['outcomes'])
 
@@ -123,7 +124,7 @@ def pymdp_likelihood(agent, external_likelihood=None, data=None, task=None, num_
         deterministic('multiactions', multiactions)
         deterministic('multiaction_probs', multiaction_probs)
         if task is not None:
-            deterministic('states', jtu.tree_map(jnp.stack, task.states))
+            deterministic('states', jtu.tree_map(jnp.stack, task.state))
         
         with plate('num_trials', num_trials):
             with plate('num_agents', num_agents):
@@ -151,13 +152,21 @@ def pymdp_likelihood(agent, external_likelihood=None, data=None, task=None, num_
         if record_agent:
             deterministic('agent_sequence', agent)
         
-        init_task = task.reset(prng_key()) if task is not None else task
+        key = prng_key()
+        if task is not None:
+            _, init_task = task.reset(jr.split(key, agent.batch_size))
+        else:
+            init_task = None
         return (agent, init_task), None
     
     if record_agent:
         deterministic('init_agent', agent)
     
-    init_task = task.reset(prng_key()) if task is not None else task
+    key = prng_key()
+    if task is not None:
+        _, init_task = task.reset(jr.split(key, agent.batch_size))
+    else:
+        init_task = None
     scan(step_fn, (agent, init_task), data, length=num_blocks)
 
 
