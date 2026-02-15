@@ -40,9 +40,9 @@ def pymdp_evolve_trials(agent, data, task, init_states, num_trials):
         state_t = carry['states']
         beliefs = agent.infer_states(
             outcomes,
-            carry['args'][0],
+            carry['pred'],
             past_actions=actions,
-            qs_hist=carry['args'][1],
+            qs_hist=carry['beliefs'],
             mask=None # TODO: add masked observations (e.g. for no response-outcome trials)
         )
         q_pi, G = agent.infer_policies(beliefs) # what to do with G?
@@ -68,12 +68,10 @@ def pymdp_evolve_trials(agent, data, task, init_states, num_trials):
         else:
           actions = jnp.expand_dims(actions_t, -2)
 
-        args = agent.update_empirical_prior(actions_t, beliefs)
+        pred = agent.update_empirical_prior(actions_t, beliefs)
 
-        # args = (pred_{t+1}, [post_1, post_{2}, ..., post_{t}])
-        # beliefs =  [post_1, post_{2}, ..., post_{t}]
         new_carry = {
-            'args': args, 
+            'pred': pred, 
             'outcomes': outcomes, 
             'beliefs': beliefs, 
             'multiactions': actions,
@@ -90,9 +88,9 @@ def pymdp_evolve_trials(agent, data, task, init_states, num_trials):
         state_0 = None
 
     init = {
-       'args': (agent.D, None,),
+       'pred': agent.D,
        'outcomes': outcome_0, 
-       'beliefs': [],
+       'beliefs': None,
        'multiactions': None, 
        'states': state_0,
     }
@@ -110,13 +108,14 @@ def pymdp_likelihood(agent, external_likelihood=None, data=None, task=None, num_
     def step_fn(carry, block_data):
         agent, states = carry
         output, multiaction_probs = pymdp_evolve_trials(agent, block_data, task, states, num_trials)
-        args = output.pop('args')
+        pred = output.pop('pred')
+        beliefs = output.pop('beliefs')
         multiactions = output.pop('multiactions')
         output['beliefs'] = agent.infer_states(
             output['outcomes'],
-            args[0],
+            pred,
             past_actions=multiactions,
-            qs_hist=args[1],
+            qs_hist=beliefs,
             mask=None,
         )
         
